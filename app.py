@@ -1,17 +1,12 @@
 import os
-import re
-import json
 import numpy as np
-from flask import Flask, request, jsonify, send_from_directory
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# Load API key from local .env file
+# Load your API key from the local .env file
 load_dotenv()
-
-app = Flask(__name__, static_folder=".")
 client = OpenAI()
 
 DATA_FILE = "data.txt"
@@ -36,7 +31,7 @@ def chunk_text(text, chunk_size=300):
 chunks = chunk_text(source_text)
 print(f"Created {len(chunks)} chunks from local file.")
 
-# Build TF-IDF search index on startup
+# Build the TF-IDF search index
 vectorizer = TfidfVectorizer()
 embeddings = vectorizer.fit_transform(chunks)
 print("TF-IDF vector index built successfully.")
@@ -47,61 +42,36 @@ def retrieve_chunks(query, top_k=3):
     top_k_indices = np.argsort(similarities[0])[-top_k:][::-1]
     return [chunks[i] for i in top_k_indices]
 
-@app.route("/")
-def index():
-    return send_from_directory(".", "index.html")
+def generate_answer(query):
+    retrieved = retrieve_chunks(query)
+    context = "\n\n".join(retrieved)
 
-@app.route("/ask", methods=["POST"])
-def ask():
-    data = request.json
-    question = data.get("question")
-    transcript = data.get("transcript", "")
-    
-    if not question:
-        return jsonify({"type": "rhetorical", "answer": "No question provided."})
-        
-    # 1. Use OpenAI to classify if the utterance is a genuine question or rhetorical
-    classifier_prompt = f"""Analyze this utterance from a lecture: "{question}"
-Recent transcript context:
-{transcript[-1500:]}
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant. Use the following context to answer the user query."
+        },
+        {
+            "role": "user",
+            "content": f"Context: {context}\n\nQuestion: {query}"
+        }
+    ]
 
-Determine if this is a genuine question directed at getting an answer or a rhetorical/transitional statement.
-Return JSON format: {{"type": "genuine"}} or {{"type": "rhetorical"}}."""
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages
+    )
 
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": classifier_prompt}],
-            response_format={"type": "json_object"}
-        )
-        result = json.loads(completion.choices[0].message.content)
-        
-        if result.get("type") != "genuine":
-            return jsonify({"type": "rhetorical"})
-            
-        # 2. Retrieve relevant context from your text file and generate the answer
-        retrieved = retrieve_chunks(question)
-        context = "\n\n".join(retrieved)
-
-        answer_prompt = f"""You are an AI teaching assistant. Answer the student's question using ONLY the provided lecture context from notes. If the answer is not in the context, say so concisely.
-
-Context:
-{context}
-
-Question: {question}
-Answer:"""
-
-        ans_completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": answer_prompt}]
-        )
-        
-        answer_text = ans_completion.choices[0].message.content
-        return jsonify({"type": "genuine", "answer": answer_text})
-        
-    except Exception as e:
-        print("Error:", e)
-        return jsonify({"type": "error", "answer": str(e)}), 500
+    return response.choices[0].message.content
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    print("\n--- RAG Assistant Ready ---")
+    while True:
+        user_query = input("\nAsk a question about your notes (or type 'exit' to quit): ")
+        if user_query.lower() == 'exit':
+            break
+        if not user_query.strip():
+            continue
+        
+        answer = generate_answer(user_query)
+        print(f"\nFinal Answer:\n{answer}")
